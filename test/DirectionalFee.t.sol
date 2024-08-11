@@ -35,11 +35,8 @@ contract DirectionalFeeTest is Test, Deployers {
 
         // Deploy the hook to an address with the correct flags
         address flags = address(
-            uint160(
-                Hooks.BEFORE_SWAP_FLAG |
-                    Hooks.BEFORE_INITIALIZE_FLAG |
-                    Hooks.AFTER_SWAP_FLAG
-            ) ^ (0x4445 << 144) // Namespace the hook to avoid collisions
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_INITIALIZE_FLAG) ^
+                (0x4445 << 144) // Namespace the hook to avoid collisions
         );
 
         deployCodeTo(
@@ -79,7 +76,7 @@ contract DirectionalFeeTest is Test, Deployers {
 
         // Perform a test swap //
         bool zeroForOne = true;
-        int256 amountSpecified = -10e18; // negative number indicates exact input swap!
+        int256 amountSpecified = -100e18; // negative number indicates exact input swap!
 
         BalanceDelta swapDelta = swap(
             key,

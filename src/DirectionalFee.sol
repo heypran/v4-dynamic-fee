@@ -50,7 +50,7 @@ contract DirectionalFee is BaseHook {
                 beforeRemoveLiquidity: false,
                 afterRemoveLiquidity: false,
                 beforeSwap: true, //
-                afterSwap: true, //
+                afterSwap: false, //
                 beforeDonate: false,
                 afterDonate: false,
                 beforeSwapReturnDelta: false,
@@ -104,17 +104,6 @@ contract DirectionalFee is BaseHook {
         );
     }
 
-    function afterSwap(
-        address,
-        PoolKey calldata key,
-        IPoolManager.SwapParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) external override returns (bytes4, int128) {
-        _updateFeeParams(key);
-        return (BaseHook.afterSwap.selector, 0);
-    }
-
     function _updateFeeParams(PoolKey calldata key) internal {
         (uint160 newSqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
         console.log("newSqrtPriceX96");
@@ -129,15 +118,12 @@ contract DirectionalFee is BaseHook {
         console.log("########## getFee");
         console.log("Block");
         console.log(block.number);
-        // console.logBool(isNewBlock(key));
+        console.logBool(isNewBlock(key));
         if (!isNewBlock(key)) {
             return poolLpFee[key.toId()][zeroForOne];
         }
         console.log("########## newBlock");
         console.log(block.number);
-
-        // update last block to current
-        poolLastBlock[key.toId()] = block.number;
 
         // do the math
         (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
@@ -149,7 +135,7 @@ contract DirectionalFee is BaseHook {
             return minLpFee;
         }
 
-        console.log("currentSqrtPriceX96");
+        console.log("currentSqrtPriceX96 & last");
         console.log(currentSqrtPriceX96);
         console.log(lastBlockSqrtPriceX96);
 
@@ -178,13 +164,17 @@ contract DirectionalFee is BaseHook {
         require(bidLpFee >= 0);
         require(offerLpFee >= 0);
 
+        // update last block & price to current
+        poolLastBlock[key.toId()] = block.number;
+        poolLastBlockSqrtX96[key.toId()] = currentSqrtPriceX96;
+
         poolLpFee[key.toId()][zeroForOne] = bidLpFee;
         poolLpFee[key.toId()][!zeroForOne] = offerLpFee;
 
         return zeroForOne ? bidLpFee : offerLpFee;
     }
 
-    function isNewBlock(PoolKey calldata key) internal returns (bool) {
+    function isNewBlock(PoolKey calldata key) internal view returns (bool) {
         uint256 lastBlockNumber = poolLastBlock[key.toId()];
         if (lastBlockNumber == block.number) {
             return false;
@@ -213,8 +203,6 @@ contract DirectionalFee is BaseHook {
 
         // Calculate absolute and relative change
         delta = priceA > priceB ? priceA - priceB : priceB - priceA;
-        relativeChange = priceA < priceB
-            ? (delta * 100) / priceA
-            : (delta * 100) / priceB;
+        relativeChange = (delta * 100) / priceB;
     }
 }
