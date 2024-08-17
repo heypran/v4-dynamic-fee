@@ -50,7 +50,7 @@ contract DirectionalFee is BaseHook {
                 beforeRemoveLiquidity: false,
                 afterRemoveLiquidity: false,
                 beforeSwap: true, //
-                afterSwap: false, //
+                afterSwap: false,
                 beforeDonate: false,
                 afterDonate: false,
                 beforeSwapReturnDelta: false,
@@ -96,7 +96,7 @@ contract DirectionalFee is BaseHook {
         console.log(lpFee);
         console.log("Block");
         console.log(block.number);
-
+        poolManager.updateDynamicLPFee(key, lpFee);
         return (
             BaseHook.beforeSwap.selector,
             BeforeSwapDeltaLibrary.ZERO_DELTA,
@@ -197,12 +197,30 @@ contract DirectionalFee is BaseHook {
     function _calculateDeltaChange(
         uint160 sqrtPriceX96A,
         uint160 sqrtPriceX96B
-    ) private pure returns (uint256 delta, uint256 relativeChange) {
+    ) private view returns (uint256 delta, uint256 relativeChange) {
         uint256 priceA = _sqrtPriceX96ToPrice(sqrtPriceX96A);
         uint256 priceB = _sqrtPriceX96ToPrice(sqrtPriceX96B);
+        console.log("sqrtPriceX96");
+        console.log(sqrtPriceX96A);
+        console.log(sqrtPriceX96B);
 
         // Calculate absolute and relative change
         delta = priceA > priceB ? priceA - priceB : priceB - priceA;
-        relativeChange = (delta * 100) / priceB;
+        console.log("delta");
+        console.log(delta);
+        console.log(priceA);
+        console.log(priceB);
+        uint256 delta2 = sqrtPriceX96A > sqrtPriceX96B
+            ? sqrtPriceX96A - sqrtPriceX96B
+            : sqrtPriceX96B - sqrtPriceX96A;
+        console.log("delta");
+        console.log(delta2);
+        console.log((delta2 * 1000000) / sqrtPriceX96B);
+        relativeChange = (delta2 * 1000000) / sqrtPriceX96B;
+        // if (priceB > 0) {
+        //     relativeChange = (delta * 100) / priceB;
+        // } else {
+        //     relativeChange = (delta * 100);
+        // }
     }
 }
