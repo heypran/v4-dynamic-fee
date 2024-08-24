@@ -6,30 +6,35 @@ import {BaseHook} from "v4-periphery/BaseHook.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
 
-import {DynamicLPFeeLibrary} from "./DynamicFeeLibrary.sol";
 import "forge-std/console.sol";
 
 contract DirectionalFee is BaseHook {
     using PoolIdLibrary for PoolKey;
-    using DynamicLPFeeLibrary for uint24;
+    using LPFeeLibrary for uint24;
+    // using DynamicLPFeeLibrary for uint24;
     using StateLibrary for IPoolManager;
 
     // NOTE: ---------------------------------------------------------
     // state variables should typically be unique to a pool
     // a single hook contract should be able to service multiple pools
     // ---------------------------------------------------------------
+    struct FeeConfig {
+        uint64 lastblock;
+        uint8 feeFactor;
+        uint160 lastBlockSqrtX96;
+    }
 
     uint24 constant minLpFee = 3000;
-    mapping(PoolId => uint160 lastBlockSqrtX96) public poolLastBlockSqrtX96;
+    mapping(PoolId => FeeConfig) public feeConfig;
     mapping(PoolId => mapping(bool zeroForOne => uint24 lpfee))
         public poolLpFee;
-    mapping(PoolId => uint256 lastBlock) public poolLastBlock;
 
     error DynamicFeeNotEnabled();
 
@@ -43,8 +48,8 @@ contract DirectionalFee is BaseHook {
     {
         return
             Hooks.Permissions({
-                beforeInitialize: true, //
-                afterInitialize: false,
+                beforeInitialize: false, //
+                afterInitialize: true, //
                 beforeAddLiquidity: false,
                 afterAddLiquidity: false,
                 beforeRemoveLiquidity: false,
@@ -64,24 +69,49 @@ contract DirectionalFee is BaseHook {
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
 
-    function beforeInitialize(
+    // function beforeInitialize(
+    //     address,
+    //     PoolKey calldata key,
+    //     uint160 sqrtPriceX96,
+    //     bytes calldata
+    // ) external override returns (bytes4) {
+    //     if (!key.fee.isDynamicFee()) {
+    //         revert DynamicFeeNotEnabled();
+    //     }
+
+    //     // feeConfig[key.toId()].lastblock = uint64(block.number);
+    //     // feeConfig[key.toId()].lastBlockSqrtX96 = sqrtPriceX96;
+    //     // feeConfig[key.toId()].feeFactor = 80; // make configurable/dynamic
+
+    //     // poolLpFee[key.toId()][true] = minLpFee;
+    //     // poolLpFee[key.toId()][false] = minLpFee;
+
+    //     // poolManager.updateDynamicLPFee(key, minLpFee);
+
+    //     return BaseHook.beforeInitialize.selector;
+    // }
+
+    function afterInitialize(
         address,
         PoolKey calldata key,
         uint160 sqrtPriceX96,
+        int24,
         bytes calldata
     ) external override returns (bytes4) {
-        // Implement your logic here
         if (!key.fee.isDynamicFee()) {
             revert DynamicFeeNotEnabled();
         }
 
-        poolLastBlock[key.toId()] = block.number;
-        poolLastBlockSqrtX96[key.toId()] = sqrtPriceX96;
+        feeConfig[key.toId()].lastblock = uint64(block.number);
+        feeConfig[key.toId()].lastBlockSqrtX96 = sqrtPriceX96;
+        feeConfig[key.toId()].feeFactor = 80; // make configurable/dynamic
 
         poolLpFee[key.toId()][true] = minLpFee;
         poolLpFee[key.toId()][false] = minLpFee;
 
-        return BaseHook.beforeInitialize.selector;
+        poolManager.updateDynamicLPFee(key, minLpFee);
+
+        return BaseHook.afterInitialize.selector;
     }
 
     function beforeSwap(
@@ -100,15 +130,8 @@ contract DirectionalFee is BaseHook {
         return (
             BaseHook.beforeSwap.selector,
             BeforeSwapDeltaLibrary.ZERO_DELTA,
-            lpFee
+            0
         );
-    }
-
-    function _updateFeeParams(PoolKey calldata key) internal {
-        (uint160 newSqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
-        console.log("newSqrtPriceX96");
-        console.log(newSqrtPriceX96);
-        poolLastBlockSqrtX96[key.toId()] = newSqrtPriceX96;
     }
 
     function _getFee(
@@ -120,6 +143,10 @@ contract DirectionalFee is BaseHook {
         console.log(block.number);
         console.logBool(isNewBlock(key));
         if (!isNewBlock(key)) {
+            console.log("zF1");
+            console.log(zeroForOne);
+            console.log(poolLpFee[key.toId()][true]);
+            console.log(poolLpFee[key.toId()][false]);
             return poolLpFee[key.toId()][zeroForOne];
         }
         console.log("########## newBlock");
@@ -127,7 +154,7 @@ contract DirectionalFee is BaseHook {
 
         // do the math
         (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
-        uint160 lastBlockSqrtPriceX96 = poolLastBlockSqrtX96[key.toId()];
+        uint160 lastBlockSqrtPriceX96 = feeConfig[key.toId()].lastBlockSqrtX96;
 
         if (currentSqrtPriceX96 == lastBlockSqrtPriceX96) {
             poolLpFee[key.toId()][zeroForOne] = minLpFee;
@@ -148,7 +175,8 @@ contract DirectionalFee is BaseHook {
         console.log(block.number);
         console.log(relativeChange);
 
-        uint256 deltaFee = (75 * relativeChange) / 100;
+        uint256 deltaFee = (feeConfig[key.toId()].feeFactor * relativeChange) /
+            100;
 
         console.log(minLpFee + deltaFee);
         console.log(minLpFee - deltaFee);
@@ -165,21 +193,17 @@ contract DirectionalFee is BaseHook {
         require(offerLpFee >= 0);
 
         // update last block & price to current
-        poolLastBlock[key.toId()] = block.number;
-        poolLastBlockSqrtX96[key.toId()] = currentSqrtPriceX96;
+        feeConfig[key.toId()].lastblock = uint64(block.number);
+        feeConfig[key.toId()].lastBlockSqrtX96 = currentSqrtPriceX96;
 
-        poolLpFee[key.toId()][zeroForOne] = bidLpFee;
-        poolLpFee[key.toId()][!zeroForOne] = offerLpFee;
+        poolLpFee[key.toId()][true] = bidLpFee;
+        poolLpFee[key.toId()][false] = offerLpFee;
 
         return zeroForOne ? bidLpFee : offerLpFee;
     }
 
     function isNewBlock(PoolKey calldata key) internal view returns (bool) {
-        uint256 lastBlockNumber = poolLastBlock[key.toId()];
-        if (lastBlockNumber == block.number) {
-            return false;
-        }
-        return true;
+        return feeConfig[key.toId()].lastblock != block.number;
     }
 
     // TODO optimize import from existing libs

@@ -27,6 +27,7 @@ contract DirectionalFeeTest is Test, Deployers {
 
     Counter hook;
     PoolId poolId;
+    uint24 poolFee = 3000;
 
     function setUp() public {
         // creates the pool manager, utility routers, and test tokens
@@ -35,8 +36,11 @@ contract DirectionalFeeTest is Test, Deployers {
 
         // Deploy the hook to an address with the correct flags
         address flags = address(
-            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_INITIALIZE_FLAG) ^
-                (0x4445 << 144) // Namespace the hook to avoid collisions
+            uint160(
+                Hooks.BEFORE_SWAP_FLAG |
+                    // Hooks.BEFORE_INITIALIZE_FLAG |
+                    Hooks.AFTER_INITIALIZE_FLAG
+            ) ^ (0x4445 << 144) // Namespace the hook to avoid collisions
         );
 
         deployCodeTo(
@@ -44,10 +48,10 @@ contract DirectionalFeeTest is Test, Deployers {
             abi.encode(manager),
             flags
         );
+
         hook = Counter(flags);
 
         // Create the pool
-        // 3000
         key = PoolKey(
             currency0,
             currency1,
@@ -58,6 +62,8 @@ contract DirectionalFeeTest is Test, Deployers {
         poolId = key.toId();
         manager.initialize(key, SQRT_PRICE_1_1, ZERO_BYTES);
 
+        console.log("DynamicLPFeeLibrary.DYNAMIC_FEE_FLAG");
+        console.logUint(DynamicLPFeeLibrary.DYNAMIC_FEE_FLAG);
         // Provide full-range liquidity to the pool
         modifyLiquidityRouter.modifyLiquidity(
             key,
@@ -76,7 +82,8 @@ contract DirectionalFeeTest is Test, Deployers {
 
         // Perform a test swap //
         bool zeroForOne = true;
-        int256 amountSpecified = -100e18; // negative number indicates exact input swap!
+        // negative number indicates exact input swap!
+        int256 amountSpecified = -10e18;
 
         BalanceDelta swapDelta = swap(
             key,
@@ -92,5 +99,117 @@ contract DirectionalFeeTest is Test, Deployers {
         // ------------------- //
 
         assertEq(int256(swapDelta.amount0()), amountSpecified);
+    }
+
+    function testFeeOneForZero() public {
+        // positions were created in setup()
+        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        assertEq(lpFeePreSwap, poolFee);
+
+        // Perform a test swap
+        bool zeroForOne = false;
+        int256 amountSpecified = -10e18;
+
+        // TODO
+        vm.expectEmit(true, false, false, false);
+        emit IPoolManager.Swap(key.toId(), address(0), 0, 0, 0, 0, 0, poolFee);
+
+        BalanceDelta swapDelta = swap(
+            key,
+            zeroForOne,
+            amountSpecified,
+            ZERO_BYTES
+        );
+        assertEq(int256(swapDelta.amount1()), amountSpecified);
+
+        vm.roll(2);
+
+        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+
+        // since we did the swap in the same direction
+        // the fee should increase
+        (, , , uint24 lpFeePostSwap) = manager.getSlot0(key.toId());
+        assertGt(lpFeePostSwap, poolFee);
+    }
+
+    function testFeeOneForZeroThenZeroForOne() public {
+        // positions were created in setup()
+        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        assertEq(lpFeePreSwap, poolFee);
+
+        // Perform a test swap
+        bool zeroForOne = false;
+        int256 amountSpecified = -10e18;
+
+        BalanceDelta swapDelta = swap(
+            key,
+            zeroForOne,
+            amountSpecified,
+            ZERO_BYTES
+        );
+
+        assertEq(int256(swapDelta.amount1()), amountSpecified);
+
+        // Check the swap fee should not change in the same block
+        (, , , uint24 lpFeePostSwap) = manager.getSlot0(key.toId());
+        assertEq(lpFeePostSwap, poolFee);
+
+        vm.roll(2);
+
+        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+
+        (, , , uint24 lpFeePostSwapNewBlock) = manager.getSlot0(key.toId());
+
+        // since we did the swap in the same direction
+        // the fee should be higher
+        assertGt(lpFeePostSwapNewBlock, poolFee);
+
+        // swap in opposite direction should give lower fee
+        zeroForOne = true;
+        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+
+        (, , , uint24 newFee) = manager.getSlot0(key.toId());
+        assertLt(newFee, poolFee);
+    }
+
+    function testFeeZeroForOneThenOneForZero() public {
+        // positions were created in setup()
+        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        assertEq(lpFeePreSwap, poolFee);
+
+        // Perform a test swap zero for one
+        bool zeroForOne = true;
+        int256 amountSpecified = -10e18;
+
+        BalanceDelta swapDelta = swap(
+            key,
+            zeroForOne,
+            amountSpecified,
+            ZERO_BYTES
+        );
+
+        assertEq(int256(swapDelta.amount0()), amountSpecified);
+
+        // Check the swap fee should not change in the same block
+        (, , , uint24 lpFeePostSwap) = manager.getSlot0(key.toId());
+        assertEq(lpFeePostSwap, poolFee);
+
+        vm.roll(2);
+
+        // Perform a test swap zero for one
+        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+
+        (, , , uint24 lpFeePostSwapNewBlock) = manager.getSlot0(key.toId());
+
+        // since we did the swap in the same direction
+        // the fee should be higher
+        assertGt(lpFeePostSwapNewBlock, poolFee);
+
+        // swap in opposite direction should give lower fee
+        zeroForOne = false;
+        swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
+
+        (, , , uint24 newFee) = manager.getSlot0(key.toId());
+        assertLt(newFee, poolFee);
     }
 }
