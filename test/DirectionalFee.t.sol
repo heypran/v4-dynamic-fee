@@ -17,17 +17,19 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
 import {Slot0} from "v4-core/src/types/Slot0.sol";
 import {MockERC20} from "solmate/test/utils/mocks/MockERC20.sol";
-import {DynamicLPFeeLibrary} from "../src/DynamicFeeLibrary.sol";
+import {LPFeeLibrary} from "v4-core/src/libraries/LPFeeLibrary.sol";
 
 contract DirectionalFeeTest is Test, Deployers {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
-    using DynamicLPFeeLibrary for uint24;
+    using LPFeeLibrary for uint24;
 
     Counter hook;
     PoolId poolId;
-    uint24 poolFee = 3000;
+    uint24 poolFee = 500;
+    uint128 poolLiquidity = 10_000 ether;
+    int24 tickSpacing = 10;
 
     function setUp() public {
         // creates the pool manager, utility routers, and test tokens
@@ -55,29 +57,27 @@ contract DirectionalFeeTest is Test, Deployers {
         key = PoolKey(
             currency0,
             currency1,
-            DynamicLPFeeLibrary.DYNAMIC_FEE_FLAG,
-            60,
+            LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            tickSpacing,
             IHooks(hook)
         );
         poolId = key.toId();
         manager.initialize(key, SQRT_PRICE_1_1, ZERO_BYTES);
 
-        console.log("DynamicLPFeeLibrary.DYNAMIC_FEE_FLAG");
-        console.logUint(DynamicLPFeeLibrary.DYNAMIC_FEE_FLAG);
         // Provide full-range liquidity to the pool
         modifyLiquidityRouter.modifyLiquidity(
             key,
             IPoolManager.ModifyLiquidityParams(
-                TickMath.minUsableTick(60),
-                TickMath.maxUsableTick(60),
-                10_000 ether,
+                TickMath.minUsableTick(tickSpacing),
+                TickMath.maxUsableTick(tickSpacing),
+                int128(poolLiquidity),
                 0
             ),
             ZERO_BYTES
         );
     }
 
-    function testDynamicFeeHooks() public {
+    function test_dynamicFee_ZeroForOne_multipleBlocks() public {
         // positions were created in setup()
 
         // Perform a test swap //
@@ -101,18 +101,26 @@ contract DirectionalFeeTest is Test, Deployers {
         assertEq(int256(swapDelta.amount0()), amountSpecified);
     }
 
-    function testFeeOneForZero() public {
+    function test_dynamicFee_OneForZero_multipleBlocks() public {
         // positions were created in setup()
-        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        uint24 lpFeePreSwap = _fetchPoolLPFee(key);
         assertEq(lpFeePreSwap, poolFee);
 
         // Perform a test swap
         bool zeroForOne = false;
-        int256 amountSpecified = -10e18;
+        int128 amountSpecified = -10e18;
 
-        // TODO
-        vm.expectEmit(true, false, false, false);
-        emit IPoolManager.Swap(key.toId(), address(0), 0, 0, 0, 0, 0, poolFee);
+        vm.expectEmit(true, false, false, true);
+        emit IPoolManager.Swap(
+            key.toId(),
+            address(swapRouter),
+            9985019972537448819,
+            amountSpecified,
+            79307351062697344798968697514,
+            poolLiquidity,
+            19,
+            poolFee
+        );
 
         BalanceDelta swapDelta = swap(
             key,
@@ -120,21 +128,38 @@ contract DirectionalFeeTest is Test, Deployers {
             amountSpecified,
             ZERO_BYTES
         );
+
         assertEq(int256(swapDelta.amount1()), amountSpecified);
 
         vm.roll(2);
+
+        uint24 expectedFee = 799;
+
+        vm.expectEmit(true, false, false, true);
+        emit IPoolManager.Swap(
+            key.toId(),
+            address(swapRouter),
+            9962121655543364430,
+            amountSpecified,
+            79386515921909760239356504222,
+            poolLiquidity,
+            39,
+            expectedFee
+        );
 
         swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
 
         // since we did the swap in the same direction
         // the fee should increase
-        (, , , uint24 lpFeePostSwap) = manager.getSlot0(key.toId());
-        assertGt(lpFeePostSwap, poolFee);
+        uint24 lpFeePostSwap = _fetchPoolLPFee(key);
+        assertEq(lpFeePostSwap, expectedFee);
     }
 
-    function testFeeOneForZeroThenZeroForOne() public {
+    function test_dynamicFee_OneForZeroThenZeroForOne_shouldGiveHighLowDirectionalFee()
+        public
+    {
         // positions were created in setup()
-        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        uint24 lpFeePreSwap = _fetchPoolLPFee(key);
         assertEq(lpFeePreSwap, poolFee);
 
         // Perform a test swap
@@ -172,9 +197,11 @@ contract DirectionalFeeTest is Test, Deployers {
         assertLt(newFee, poolFee);
     }
 
-    function testFeeZeroForOneThenOneForZero() public {
+    function test_dynamicFee_ZeroForOneThenOneForZero_shouldGiveHighLowDirectionalFee()
+        public
+    {
         // positions were created in setup()
-        (, , , uint24 lpFeePreSwap) = manager.getSlot0(key.toId());
+        uint24 lpFeePreSwap = _fetchPoolLPFee(key);
         assertEq(lpFeePreSwap, poolFee);
 
         // Perform a test swap zero for one
@@ -191,7 +218,7 @@ contract DirectionalFeeTest is Test, Deployers {
         assertEq(int256(swapDelta.amount0()), amountSpecified);
 
         // Check the swap fee should not change in the same block
-        (, , , uint24 lpFeePostSwap) = manager.getSlot0(key.toId());
+        uint24 lpFeePostSwap = _fetchPoolLPFee(key);
         assertEq(lpFeePostSwap, poolFee);
 
         vm.roll(2);
@@ -199,7 +226,7 @@ contract DirectionalFeeTest is Test, Deployers {
         // Perform a test swap zero for one
         swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
 
-        (, , , uint24 lpFeePostSwapNewBlock) = manager.getSlot0(key.toId());
+        uint24 lpFeePostSwapNewBlock = _fetchPoolLPFee(key);
 
         // since we did the swap in the same direction
         // the fee should be higher
@@ -209,7 +236,14 @@ contract DirectionalFeeTest is Test, Deployers {
         zeroForOne = false;
         swap(key, zeroForOne, amountSpecified, ZERO_BYTES);
 
-        (, , , uint24 newFee) = manager.getSlot0(key.toId());
+        uint24 newFee = _fetchPoolLPFee(key);
         assertLt(newFee, poolFee);
+    }
+
+    function _fetchPoolLPFee(
+        PoolKey memory _key
+    ) internal view returns (uint24 lpFee) {
+        PoolId id = _key.toId();
+        (, , , lpFee) = manager.getSlot0(id);
     }
 }

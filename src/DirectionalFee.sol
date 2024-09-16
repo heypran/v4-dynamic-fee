@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.24;
 
 import {BaseHook} from "v4-periphery/BaseHook.sol";
@@ -12,8 +12,6 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
-
-import "forge-std/console.sol";
 
 contract DirectionalFee is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -31,7 +29,9 @@ contract DirectionalFee is BaseHook {
         uint160 lastBlockSqrtX96;
     }
 
-    uint24 constant minLpFee = 3000;
+    // TODO dynamic pool based
+    uint24 constant minLpFee = 500;
+
     mapping(PoolId => FeeConfig) public feeConfig;
     mapping(PoolId => mapping(bool zeroForOne => uint24 lpfee))
         public poolLpFee;
@@ -69,35 +69,13 @@ contract DirectionalFee is BaseHook {
     // NOTE: see IHooks.sol for function documentation
     // -----------------------------------------------
 
-    // function beforeInitialize(
-    //     address,
-    //     PoolKey calldata key,
-    //     uint160 sqrtPriceX96,
-    //     bytes calldata
-    // ) external override returns (bytes4) {
-    //     if (!key.fee.isDynamicFee()) {
-    //         revert DynamicFeeNotEnabled();
-    //     }
-
-    //     // feeConfig[key.toId()].lastblock = uint64(block.number);
-    //     // feeConfig[key.toId()].lastBlockSqrtX96 = sqrtPriceX96;
-    //     // feeConfig[key.toId()].feeFactor = 80; // make configurable/dynamic
-
-    //     // poolLpFee[key.toId()][true] = minLpFee;
-    //     // poolLpFee[key.toId()][false] = minLpFee;
-
-    //     // poolManager.updateDynamicLPFee(key, minLpFee);
-
-    //     return BaseHook.beforeInitialize.selector;
-    // }
-
     function afterInitialize(
         address,
         PoolKey calldata key,
         uint160 sqrtPriceX96,
         int24,
         bytes calldata
-    ) external override returns (bytes4) {
+    ) external override poolManagerOnly returns (bytes4) {
         if (!key.fee.isDynamicFee()) {
             revert DynamicFeeNotEnabled();
         }
@@ -119,14 +97,15 @@ contract DirectionalFee is BaseHook {
         PoolKey calldata key,
         IPoolManager.SwapParams calldata params,
         bytes calldata
-    ) external override returns (bytes4, BeforeSwapDelta, uint24) {
-        console.log("Before Swap");
+    )
+        external
+        override
+        poolManagerOnly
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
         uint24 lpFee = _getFee(key, params.zeroForOne);
-        console.log("new lpFee");
-        console.log(lpFee);
-        console.log("Block");
-        console.log(block.number);
         poolManager.updateDynamicLPFee(key, lpFee);
+
         return (
             BaseHook.beforeSwap.selector,
             BeforeSwapDeltaLibrary.ZERO_DELTA,
@@ -138,19 +117,9 @@ contract DirectionalFee is BaseHook {
         PoolKey calldata key,
         bool zeroForOne
     ) internal returns (uint24 lpFee) {
-        console.log("########## getFee");
-        console.log("Block");
-        console.log(block.number);
-        console.logBool(isNewBlock(key));
         if (!isNewBlock(key)) {
-            console.log("zF1");
-            console.log(zeroForOne);
-            console.log(poolLpFee[key.toId()][true]);
-            console.log(poolLpFee[key.toId()][false]);
             return poolLpFee[key.toId()][zeroForOne];
         }
-        console.log("########## newBlock");
-        console.log(block.number);
 
         // do the math
         (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
@@ -162,35 +131,36 @@ contract DirectionalFee is BaseHook {
             return minLpFee;
         }
 
-        console.log("currentSqrtPriceX96 & last");
-        console.log(currentSqrtPriceX96);
-        console.log(lastBlockSqrtPriceX96);
-
         (, uint256 relativeChange) = _calculateDeltaChange(
             currentSqrtPriceX96,
             lastBlockSqrtPriceX96
         );
 
-        console.log("priceChangeDelta");
-        console.log(block.number);
-        console.log(relativeChange);
-
         uint256 deltaFee = (feeConfig[key.toId()].feeFactor * relativeChange) /
             100;
 
-        console.log(minLpFee + deltaFee);
-        console.log(minLpFee - deltaFee);
+        uint24 modDeltaFee = uint24(deltaFee % minLpFee);
 
         uint24 bidLpFee = uint24(
-            zeroForOne ? minLpFee + deltaFee : minLpFee - deltaFee
-        ); //f+cA/f-cA
+            zeroForOne ? minLpFee + modDeltaFee : minLpFee - modDeltaFee
+        ); // f+cA/f-cA
 
         uint24 offerLpFee = uint24(
-            zeroForOne ? minLpFee - deltaFee : minLpFee + deltaFee
+            zeroForOne ? minLpFee - modDeltaFee : minLpFee + modDeltaFee
         ); // f-cA/f+cA
 
-        require(bidLpFee >= 0);
-        require(offerLpFee >= 0);
+        // This can also made configurable and dynamic
+        uint24 antiFragileFee = minLpFee / 2;
+
+        // anti fragile fee
+        // minimum fee should be atleast half of the pool fee
+        if (bidLpFee < antiFragileFee) {
+            bidLpFee = antiFragileFee;
+        }
+
+        if (offerLpFee < antiFragileFee) {
+            offerLpFee = antiFragileFee;
+        }
 
         // update last block & price to current
         feeConfig[key.toId()].lastblock = uint64(block.number);
@@ -206,45 +176,15 @@ contract DirectionalFee is BaseHook {
         return feeConfig[key.toId()].lastblock != block.number;
     }
 
-    // TODO optimize import from existing libs
-    uint256 constant Q96 = 2 ** 96;
-    uint256 constant Q192 = Q96 * Q96;
-
-    function _sqrtPriceX96ToPrice(
-        uint160 sqrtPriceX96
-    ) private pure returns (uint256) {
-        // Compute price P from sqrtPriceX96
-        return (uint256(sqrtPriceX96) * uint256(sqrtPriceX96)) / Q192;
-    }
-
-    // TODO optimize
     function _calculateDeltaChange(
         uint160 sqrtPriceX96A,
         uint160 sqrtPriceX96B
-    ) private view returns (uint256 delta, uint256 relativeChange) {
-        uint256 priceA = _sqrtPriceX96ToPrice(sqrtPriceX96A);
-        uint256 priceB = _sqrtPriceX96ToPrice(sqrtPriceX96B);
-        console.log("sqrtPriceX96");
-        console.log(sqrtPriceX96A);
-        console.log(sqrtPriceX96B);
-
+    ) internal pure returns (uint256 delta, uint256 relativeChange) {
         // Calculate absolute and relative change
-        delta = priceA > priceB ? priceA - priceB : priceB - priceA;
-        console.log("delta");
-        console.log(delta);
-        console.log(priceA);
-        console.log(priceB);
-        uint256 delta2 = sqrtPriceX96A > sqrtPriceX96B
+        delta = sqrtPriceX96A > sqrtPriceX96B
             ? sqrtPriceX96A - sqrtPriceX96B
             : sqrtPriceX96B - sqrtPriceX96A;
-        console.log("delta");
-        console.log(delta2);
-        console.log((delta2 * 1000000) / sqrtPriceX96B);
-        relativeChange = (delta2 * 1000000) / sqrtPriceX96B;
-        // if (priceB > 0) {
-        //     relativeChange = (delta * 100) / priceB;
-        // } else {
-        //     relativeChange = (delta * 100);
-        // }
+
+        relativeChange = (delta * 1000000) / sqrtPriceX96B;
     }
 }
